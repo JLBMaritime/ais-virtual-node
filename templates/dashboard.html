@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-6 col-md-3">
+    <div class="card stat-card">
+      <div class="card-body">
+        <div class="stat-label">Vessels tracked</div>
+        <div class="stat-value" id="stat-vessels">0</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card">
+      <div class="card-body">
+        <div class="stat-label">Sentences sent</div>
+        <div class="stat-value" id="stat-sent">0</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-2">
+    <div class="card stat-card">
+      <div class="card-body">
+        <div class="stat-label">AIS Friends</div>
+        <div class="small" id="stat-af">--</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-2">
+    <div class="card stat-card">
+      <div class="card-body">
+        <div class="stat-label">AISHub</div>
+        <div class="small" id="stat-ah">--</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-2">
+    <div class="card stat-card">
+      <div class="card-body">
+        <div class="stat-label">Kpler</div>
+        <div class="small" id="stat-kp">--</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Coverage area &amp; vessels</div>
+      <div id="map" class="map-large"></div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <span>Live NMEA console</span>
+        <span class="text-muted small" id="console-count">0 sentences</span>
+      </div>
+      <pre id="console" class="console p-2 m-0"></pre>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header">Forwarders</div>
+      <table class="table table-sm table-dark mb-0">
+        <thead><tr><th>Endpoint</th><th>Protocol</th><th>Status</th><th>Sent</th><th>Last error</th></tr></thead>
+        <tbody id="fwd-tbody"><tr><td colspan="5" class="text-muted">—</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>VAISN.initDashboard();</script>
+{% endblock %}

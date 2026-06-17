@@ -1,0 +1,48 @@
+[Unit]
+Description=AIS Virtual Node (JLBMaritime)
+Documentation=https://github.com/JLBMaritime/ais-virtual-node
+# Wait for the network to come up so the first poll can resolve aishub.net /
+# aisfriends.com - the worker copes with a missing network at start, but the
+# logs are quieter this way.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__APPDIR__
+
+# venv interpreter -> entry point. virtual_ais_node.py auto-starts the worker
+# when config.json sets "autostart": true, but the systemd unit is the source
+# of truth for "is the daemon supposed to be running".
+ExecStart=__APPDIR__/.venv/bin/python __APPDIR__/virtual_ais_node.py
+
+# Restart on any unclean exit; back off so we don't spin in a tight loop if
+# something's permanently wrong (bad config, port in use, missing creds, ...).
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Send stdout/stderr to journald - tail with: journalctl -u ais-virtual-node -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ais-virtual-node
+
+# --- hardening ---
+# The Wi-Fi page calls `sudo nmcli`, so the service must keep the ability to
+# spawn sudo. NoNewPrivileges=true would block that (sudo can't re-elevate),
+# so we deliberately don't set it.
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Make sure /home/__USER__/ais-virtual-node stays writable for config.json
+ReadWritePaths=__APPDIR__
+
+[Install]
+WantedBy=multi-user.target

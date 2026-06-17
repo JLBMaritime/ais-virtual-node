@@ -1,0 +1,360 @@
+"""Flask web UI for the Virtual AIS Node."""
+from __future__ import annotations
+
+import time
+from typing import Any, Dict
+
+from flask import Flask, jsonify, render_template, request
+
+from . import config as cfgmod
+from ._paths import bundle_root
+from .worker import WORKER
+
+# In a PyInstaller one-file build the templates/ and static/ folders live
+# inside `sys._MEIPASS`, not next to the .exe. `bundle_root()` returns the
+# right directory for both frozen and dev runs.
+_ROOT = bundle_root()
+app = Flask(__name__,
+            template_folder=str(_ROOT / "templates"),
+            static_folder=str(_ROOT / "static"))
+
+
+# ----------- pages -----------
+
+@app.route("/")
+def index():
+    return render_template("dashboard.html", page="dashboard")
+
+
+@app.route("/config")
+def config_page():
+    return render_template("config.html", page="config", cfg=cfgmod.load())
+
+
+@app.route("/credentials")
+def credentials_page():
+    cfg = cfgmod.load()
+    return render_template("credentials.html", page="credentials", cfg=cfg)
+
+
+@app.route("/logs")
+def logs_page():
+    return render_template("logs.html", page="logs")
+
+
+@app.route("/wifi")
+def wifi_page():
+    return render_template("wifi.html", page="wifi")
+
+
+# ----------- API: status / control -----------
+
+@app.route("/api/status")
+def api_status():
+    s = dict(WORKER.status)
+    s["running"]    = WORKER.is_running()
+    s["forwarders"] = [f.status() for f in WORKER.forwarders]
+    s["vessels"]    = len(WORKER.vessels)
+    s["now"]        = time.time()
+    return jsonify(s)
+
+
+@app.route("/api/start", methods=["POST"])
+def api_start():
+    WORKER.start()
+    return jsonify({"running": WORKER.is_running()})
+
+
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    WORKER.stop()
+    return jsonify({"running": WORKER.is_running()})
+
+
+@app.route("/api/vessels")
+def api_vessels():
+    out = []
+    for v in WORKER.vessels.values():
+        out.append({
+            "mmsi":     v["mmsi"],
+            "name":     v.get("name", ""),
+            "lat":      v["lat"],
+            "lon":      v["lon"],
+            "sog":      v.get("sog"),
+            "cog":      v.get("cog"),
+            "heading":  v.get("heading"),
+            "ais_type": v.get("ais_type"),
+            "src":      v.get("source"),
+            "ts":       v.get("ts"),
+        })
+    return jsonify(out)
+
+
+@app.route("/api/log")
+def api_log():
+    after = int(request.args.get("after", 0))
+    limit = int(request.args.get("limit", 200))
+    return jsonify(WORKER.sentence_log.latest(after_id=after, limit=limit))
+
+
+# ----------- API: config -----------
+
+@app.route("/api/config", methods=["GET"])
+def api_config_get():
+    return jsonify(cfgmod.load())
+
+
+@app.route("/api/config", methods=["POST"])
+def api_config_post():
+    data: Dict[str, Any] = request.get_json(silent=True) or {}
+    cfgmod.update(data)
+    WORKER.reload_config()
+    return jsonify(cfgmod.load())
+
+
+@app.route("/api/credentials", methods=["POST"])
+def api_credentials_post():
+    data: Dict[str, Any] = request.get_json(silent=True) or {}
+    # data keys (all optional):
+    #   aisfriends_token, aisfriends_backend, aisfriends_flaresolverr_url,
+    #   aishub_username
+    updates: Dict[str, Any] = {"sources": {}}
+    af: Dict[str, Any] = {}
+    if "aisfriends_token" in data:
+        af["token"] = (data["aisfriends_token"] or "").strip()
+    if "aisfriends_backend" in data:
+        b = (data["aisfriends_backend"] or "").strip() or "flaresolverr"
+        if b not in ("flaresolverr", "curl_cffi", "cloudscraper", "requests"):
+            b = "flaresolverr"
+        af["backend"] = b
+    if "aisfriends_flaresolverr_url" in data:
+        af["flaresolverr_url"] = (data["aisfriends_flaresolverr_url"] or "").strip() or "http://localhost:8191"
+    if af:
+        updates["sources"]["aisfriends"] = af
+    if "aishub_username" in data:
+        updates["sources"]["aishub"] = {"username": (data["aishub_username"] or "").strip()}
+
+    # Kpler ------------------------------------------------------------
+    kp: Dict[str, Any] = {}
+    if "kpler_credential" in data:
+        kp["credential"] = (data["kpler_credential"] or "").strip()
+    if "kpler_token_url" in data:
+        kp["token_url"]  = (data["kpler_token_url"] or "").strip() or "https://auth.kpler.com/oauth/token"
+    if "kpler_audience" in data:
+        kp["audience"]   = (data["kpler_audience"] or "").strip() or "https://api.kpler.com"
+    if "kpler_api_url" in data:
+        kp["api_url"]    = (data["kpler_api_url"] or "").strip() or "https://api.sml.kpler.com/graphql"
+    if "kpler_flavour" in data:
+        f = (data["kpler_flavour"] or "").strip().lower() or "graphql"
+        if f not in ("graphql", "messages"):
+            f = "graphql"
+        kp["flavour"] = f
+    if kp:
+        updates["sources"]["kpler"] = kp
+
+    cfgmod.update(updates)
+    # Tear down any cached AIS Friends sessions + Kpler tokens so the new
+    # backend/token/credential is picked up on the next poll / Test click.
+    try:
+        from . import sources as src_mod
+        src_mod.reset_af_session()
+        if hasattr(src_mod, "reset_kpler_cache"):
+            src_mod.reset_kpler_cache()
+    except Exception:
+        pass
+    WORKER.reload_config()
+    return jsonify({"ok": True})
+
+
+def _classify_aisfriends_error(exc: BaseException, backend: str, fs_url: str) -> str:
+    """Turn a poll_aisfriends exception into a human-actionable message."""
+    import requests as _r
+    # FlareSolverr-specific errors
+    from .sources import FlareSolverrError
+    if isinstance(exc, FlareSolverrError):
+        return str(exc)
+    # requests.HTTPError carries the response's status code
+    if isinstance(exc, _r.HTTPError) and exc.response is not None:
+        code = exc.response.status_code
+        if code == 401:
+            return ("HTTP 401 Unauthorized - the AIS Friends token is missing or "
+                    "expired. Regenerate it at aisfriends.com -> Account -> "
+                    "Details -> API Tokens, paste it above and Save.")
+        if code == 403:
+            if backend != "flaresolverr":
+                return (f"HTTP 403 - Cloudflare blocked the direct request "
+                        f"(backend = '{backend}'). Switch backend to "
+                        f"'FlareSolverr' and make sure the container is "
+                        f"running ({fs_url}).")
+            return ("HTTP 403 - Cloudflare blocked the request even via "
+                    "FlareSolverr. Try `docker pull "
+                    "ghcr.io/flaresolverr/flaresolverr:latest` then "
+                    "`docker restart flaresolverr` (the bundled Chromium may "
+                    "need updating), or test from a different network.")
+        if code == 404:
+            return ("HTTP 404 - endpoint not found. The AIS Friends API URL "
+                    "may have changed; check https://www.aisfriends.com/docs/api/v1")
+        if code == 429:
+            return ("HTTP 429 - rate-limited. AIS Friends allows 1 request "
+                    "per minute. Wait a minute and try again.")
+        return f"HTTP {code} from AIS Friends: {exc.response.text[:200]}"
+    # Plain ConnectionError - typically the FlareSolverr container being down
+    if isinstance(exc, _r.exceptions.ConnectionError):
+        if backend == "flaresolverr":
+            return (f"Could not reach FlareSolverr at {fs_url}. Start it "
+                    f"with: docker start flaresolverr  (or run the one-line "
+                    f"`docker run -d --name flaresolverr ...` from the README "
+                    f"if it isn't created yet).")
+        return f"Network error reaching aisfriends.com: {exc}"
+    return str(exc)
+
+
+def _classify_kpler_error(exc: BaseException) -> str:
+    """Turn a poll_kpler exception into a human-actionable message."""
+    msg = str(exc)
+    low = msg.lower()
+    # Auth0 client-grant missing - very common, exact text from Auth0.
+    if "client-grant" in low or "not authorized to access resource server" in low:
+        return (
+            "Kpler rejected the credentials: the client_id exists but no "
+            "API grant is attached to it yet. Open a ticket via "
+            "developers.kpler.com (or your account manager) asking them to "
+            "attach the client-grant for the product you subscribed to. "
+            "Until they do, no audience will mint a token."
+        )
+    if "service not enabled within domain" in low:
+        return (
+            "Kpler rejected the configured audience as unknown. The audience "
+            "string in the Credentials page does not match any of Kpler's "
+            "registered API audiences. The two publicly known ones are "
+            "`https://api.kpler.com` and `https://terminal.kpler.com`; if "
+            "neither works your plan may need a product-specific audience - "
+            "ask Kpler support."
+        )
+    if "invalid_client" in low or "unauthorized" in low and "client" in low:
+        return ("Kpler returned `invalid_client` - the client_id or "
+                "client_secret is wrong. Regenerate the key in "
+                "developers.kpler.com/my-api-keys and paste the new value.")
+    if "401" in msg and "access token rejected" in low:
+        return ("HTTP 401 from the Kpler API even though we minted a token. "
+                "The audience minted a token for a different product than the "
+                "API URL you set. Either change the API URL to match the "
+                "product the audience grants, or change the audience.")
+    if "could not reach kpler" in low:
+        return msg  # already self-explanatory
+    return msg
+
+
+@app.route("/api/test-source/<source>", methods=["POST"])
+def api_test_source(source: str):
+    """Smoke-test a single source with the saved credentials + bbox."""
+    from . import sources as src_mod
+    cfg = cfgmod.load()
+    bbox = cfg["bbox"]
+    afcfg = cfg["sources"].get("aisfriends", {})
+    backend = afcfg.get("backend", "flaresolverr")
+    fs_url  = afcfg.get("flaresolverr_url", "http://localhost:8191")
+    try:
+        if source == "aisfriends":
+            # Always reset the session so we test with the just-saved settings.
+            try:
+                src_mod.reset_af_session()
+            except Exception:
+                pass
+            v = src_mod.poll_aisfriends(
+                bbox,
+                afcfg.get("token", ""),
+                backend=backend,
+                flaresolverr_url=fs_url,
+            )
+        elif source == "aishub":
+            v = src_mod.poll_aishub(bbox, cfg["sources"]["aishub"].get("username", ""))
+        elif source == "kpler":
+            kpcfg = cfg["sources"].get("kpler", {})
+            try:
+                src_mod.reset_kpler_cache()
+            except Exception:
+                pass
+            v = src_mod.poll_kpler(
+                bbox,
+                kpcfg.get("credential", ""),
+                api_url=kpcfg.get("api_url",   src_mod.KPLER_DEFAULT_API_URL),
+                token_url=kpcfg.get("token_url", src_mod.KPLER_DEFAULT_TOKEN_URL),
+                audience=kpcfg.get("audience",   src_mod.KPLER_DEFAULT_AUDIENCE),
+                flavour=kpcfg.get("flavour",     src_mod.KPLER_DEFAULT_FLAVOUR),
+            )
+        else:
+            return jsonify({"ok": False, "error": "unknown source"}), 400
+        return jsonify({"ok": True, "vessels": len(v), "backend": backend if source == "aisfriends" else None})
+    except Exception as exc:
+        if source == "aisfriends":
+            err = _classify_aisfriends_error(exc, backend, fs_url)
+        elif source == "kpler":
+            err = _classify_kpler_error(exc)
+        else:
+            err = str(exc)
+        return jsonify({"ok": False, "error": err, "backend": backend if source == "aisfriends" else None}), 200
+
+
+
+# ----------- API: Wi-Fi (NetworkManager via nmcli) -----------
+#
+# All wrapped in try/except so the page degrades gracefully on hosts without
+# NetworkManager rather than throwing 500s. The frontend disables the
+# controls when nmcli_available is False.
+
+@app.route("/api/wifi/status")
+def api_wifi_status():
+    from . import wifi as wifi_mod
+    try:
+        return jsonify(wifi_mod.status())
+    except wifi_mod.WifiError as exc:
+        return jsonify({"interfaces": [], "hostname": "", "nmcli_available": False, "error": str(exc)})
+
+
+@app.route("/api/wifi/scan")
+def api_wifi_scan():
+    from . import wifi as wifi_mod
+    rescan = request.args.get("rescan", "1") != "0"
+    try:
+        return jsonify({"ok": True, "networks": wifi_mod.scan(rescan=rescan)})
+    except wifi_mod.WifiError as exc:
+        return jsonify({"ok": False, "error": str(exc), "networks": []})
+
+
+@app.route("/api/wifi/saved")
+def api_wifi_saved():
+    from . import wifi as wifi_mod
+    try:
+        return jsonify({"ok": True, "profiles": wifi_mod.saved()})
+    except wifi_mod.WifiError as exc:
+        return jsonify({"ok": False, "error": str(exc), "profiles": []})
+
+
+@app.route("/api/wifi/connect", methods=["POST"])
+def api_wifi_connect():
+    from . import wifi as wifi_mod
+    data = request.get_json(silent=True) or {}
+    ssid     = (data.get("ssid") or "").strip()
+    password = data.get("password") or None
+    hidden   = bool(data.get("hidden"))
+    try:
+        return jsonify(wifi_mod.connect(ssid, password=password, hidden=hidden))
+    except wifi_mod.WifiError as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+
+
+@app.route("/api/wifi/forget", methods=["POST"])
+def api_wifi_forget():
+    from . import wifi as wifi_mod
+    data = request.get_json(silent=True) or {}
+    target = (data.get("ssid") or data.get("name") or "").strip()
+    try:
+        return jsonify(wifi_mod.forget(target))
+    except wifi_mod.WifiError as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+
+
+def run(host: str, port: int, debug: bool = False) -> None:
+    # Flask >= 3 - use_reloader must be False or worker thread duplicates
+    app.run(host=host, port=port, debug=debug, use_reloader=False, threaded=True)

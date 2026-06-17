@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between">
+    <span>NMEA sentences (live)</span>
+    <span class="text-muted small" id="logs-count">0</span>
+  </div>
+  <pre id="logs" class="console p-2 m-0" style="height:70vh"></pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>VAISN.initLogs();</script>
+{% endblock %}

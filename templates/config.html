@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Bounding box</div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">
+          <strong>Drag the blue box</strong> to move it, or <strong>drag a corner</strong> to resize.
+          The four values below update live; you can also type into them.
+          <button type="button" id="bbox-fit" class="btn btn-link btn-sm p-0 ms-1 align-baseline">Re-centre map</button>
+          <br>Both APIs require <code>latmin&lt;latmax</code> and <code>lonmin&lt;lonmax</code>;
+          no crossing the antimeridian.
+        </p>
+        <div class="row g-2">
+          <div class="col-6 col-md-3"><label class="form-label">lat min</label><input class="form-control" id="latmin" type="number" step="0.001" value="{{ cfg.bbox.latmin }}"></div>
+          <div class="col-6 col-md-3"><label class="form-label">lat max</label><input class="form-control" id="latmax" type="number" step="0.001" value="{{ cfg.bbox.latmax }}"></div>
+          <div class="col-6 col-md-3"><label class="form-label">lon min</label><input class="form-control" id="lonmin" type="number" step="0.001" value="{{ cfg.bbox.lonmin }}"></div>
+          <div class="col-6 col-md-3"><label class="form-label">lon max</label><input class="form-control" id="lonmax" type="number" step="0.001" value="{{ cfg.bbox.lonmax }}"></div>
+        </div>
+      </div>
+      <div id="map-config" class="map-large"></div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header">Polling</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-6"><label class="form-label">Interval per source (s)</label><input class="form-control" id="poll-interval" type="number" min="30" value="{{ cfg.poll.interval_seconds }}"></div>
+          <div class="col-6"><label class="form-label">Stagger between sources (s)</label><input class="form-control" id="poll-stagger" type="number" min="0" value="{{ cfg.poll.stagger_seconds }}"></div>
+        </div>
+        <p class="form-text">Default: 60s each, offset 30s, so a fresh frame arrives every 30s.</p>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="src-af" {% if cfg.sources.aisfriends.enabled %}checked{% endif %}>
+          <label class="form-check-label">Poll AIS Friends</label>
+        </div>
+
+        <div class="form-check"><input class="form-check-input" type="checkbox" id="src-ah" {% if cfg.sources.aishub.enabled %}checked{% endif %}><label class="form-check-label">Poll AISHub</label></div>
+        <div class="form-check"><input class="form-check-input" type="checkbox" id="src-kp" {% if cfg.sources.kpler.enabled %}checked{% endif %}><label class="form-check-label">Poll Kpler</label></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <span>Output forwarders</span>
+        <button id="add-fwd" class="btn btn-sm btn-outline-primary">+ Add</button>
+      </div>
+      <div class="card-body" id="outputs-body"></div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body">
+        <button id="save-config" class="btn btn-primary">Save configuration</button>
+        <span id="save-status" class="ms-2 small text-muted"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Worker control</div>
+      <div class="card-body d-flex align-items-center flex-wrap gap-2">
+        <button id="startBtn" class="btn btn-success">Start</button>
+        <button id="stopBtn"  class="btn btn-outline-light">Stop</button>
+        <span class="text-muted small ms-2">
+          Start / stop the polling + forwarding worker. Current state is shown
+          by the badge in the page header.
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>VAISN.initConfig({{ cfg.outputs|tojson }});</script>
+{% endblock %}

@@ -1,0 +1,9 @@
+requests>=2.31.0
+# Primary Cloudflare bypass - browser TLS+HTTP2 impersonation.
+# Cloudflare fingerprints urllib3's TLS handshake; curl_cffi reproduces Chrome's
+# byte-for-byte, so AIS Friends sees a real-Chrome request and returns 200.
+curl_cffi>=0.7.0
+# Fallback (handles only the basic JS "Just a moment..." challenge).
+cloudscraper>=1.2.71
+flask>=3.0.0
+pyais>=2.6.0

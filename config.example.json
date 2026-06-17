@@ -1,0 +1,52 @@
+{
+  "bbox": {
+    "latmin": 49.0,
+    "latmax": 51.5,
+    "lonmin": -5.0,
+    "lonmax": 2.5
+  },
+  "sources": {
+    "aisfriends": {
+      "enabled": false,
+      "token": "",
+      "backend": "flaresolverr",
+      "flaresolverr_url": "http://localhost:8191"
+    },
+    "aishub": {
+      "enabled": false,
+      "username": ""
+    },
+    "kpler": {
+      "enabled": false,
+      "credential": "",
+      "token_url": "https://auth.kpler.com/oauth/token",
+      "audience": "https://api.kpler.com",
+      "api_url": "https://api.sml.kpler.com/graphql",
+      "flavour": "graphql"
+    }
+  },
+  "poll": {
+    "interval_seconds": 60,
+    "stagger_seconds": 20
+  },
+  "outputs": [
+    {
+      "enabled": true,
+      "protocol": "tcp",
+      "host": "127.0.0.1",
+      "port": 10110
+    }
+  ],
+  "encoding": {
+    "force_class_b": true,
+    "talker_id": "AIVDM",
+    "static_every_sec": 360,
+    "vessel_ttl_seconds": 60
+  },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "log_size": 500
+  },
+  "autostart": false
+}
