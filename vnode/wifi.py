@@ -88,10 +88,29 @@ def _run(args: List[str], *, timeout: int = _DEFAULT_TIMEOUT,
         raise WifiError(f"nmcli timed out after {timeout}s: {' '.join(args)}") from exc
 
     if cp.returncode != 0:
-        err = (cp.stderr or cp.stdout or "").strip().splitlines()
-        msg = err[-1] if err else f"nmcli exit {cp.returncode}"
-        # Detect the specific "no NOPASSWD entry" path and explain how to fix it.
-        if "a password is required" in msg.lower() or "sudo: a password" in msg.lower():
+        # Keep the WHOLE stderr (joined) so the user sees the actual root cause.
+        # The previous version grabbed only the last line, which hides the
+        # informative first line of multi-line sudo errors like
+        #   sudo: The "no new privileges" flag is set, ...
+        #   sudo: If sudo is running in a container, ...
+        # leaving the user staring at the (useless) "container" line.
+        raw = (cp.stderr or cp.stdout or "").strip()
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        msg = " | ".join(lines) if lines else f"nmcli exit {cp.returncode}"
+        low = msg.lower()
+        # Translate the common failure modes into actionable hints. Order
+        # matters - the NNP path also mentions "sudo:" so it must be checked
+        # before the generic "a password is required" branch.
+        if "no new privileges" in low:
+            msg = ("sudo refused because the systemd unit has "
+                   "NoNewPrivileges=yes (either set directly or implied by a "
+                   "hardening directive like ProtectKernelTunables / "
+                   "ProtectKernelModules / ProtectClock / SystemCallFilter / "
+                   "RestrictSUIDSGID / LockPersonality). Fix: remove those "
+                   "directives from systemd/ais-virtual-node.service, then "
+                   "run `cd ~/ais-virtual-node && ./scripts/update.sh` "
+                   "(it re-stages the unit and restarts the service).")
+        elif "a password is required" in low or "sudo: a password" in low:
             msg = ("nmcli refused: this user has no NOPASSWD sudoers entry "
                    "for /usr/bin/nmcli. Re-run install.sh, or add: "
                    "`<user> ALL=(root) NOPASSWD: /usr/bin/nmcli` to "

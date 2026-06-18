@@ -34,8 +34,34 @@ The whole stack also runs on a Pi Zero 2 W if you skip FlareSolverr
 Flash Raspberry Pi OS Bookworm, enable SSH, log in as `pi`, then:
 
 ```bash
+# 1. Bring the fresh image fully up to date (kernel + firmware + packages).
+#    On a brand-new Pi this can take a few minutes.
+sudo apt update
+sudo apt full-upgrade -y
+
+# 2. Reboot if the upgrade pulled in a new kernel / firmware. It's safe to
+#    always run this - it's a no-op if nothing changed, and it avoids
+#    surprises when install.sh later adds NetworkManager, Docker, Tailscale.
+sudo reboot
+```
+
+After the Pi comes back up, SSH in again and:
+
+```bash
+# 3. Git ships with Pi OS Desktop but NOT with Pi OS Lite, so install it
+#    explicitly. The line is a no-op if git is already present.
+sudo apt install -y git
+
+# 4. Clone the repo into your home directory.
 git clone https://github.com/JLBMaritime/ais-virtual-node.git
 cd ais-virtual-node
+
+# 5. Make the installer + maintenance scripts executable. The +x bit can
+#    be lost on some file transfers (USB stick, Windows-formatted SD,
+#    SFTP without preserve-permissions), so set it explicitly.
+chmod +x install.sh scripts/*.sh
+
+# 6. Run the installer.
 sudo ./install.sh
 ```
 
@@ -149,6 +175,26 @@ keyboard + monitor into the Pi and running:
 sudo nmcli connection delete "<bad-ssid>"
 sudo nmcli device wifi connect "<good-ssid>" password "<good-password>"
 ```
+
+### Wi-Fi page shows *"sudo: no new privileges flag is set"*
+
+The Wi-Fi page calls `sudo nmcli` under the hood. If your systemd unit has
+`NoNewPrivileges=yes` — either set explicitly **or** implied by a hardening
+directive like `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
+`ProtectClock=yes`, `SystemCallFilter=...`, `RestrictSUIDSGID=yes` or
+`LockPersonality=yes` — sudo cannot escalate and every Wi-Fi API call
+fails with this error. To fix:
+
+```bash
+# Edit systemd/ais-virtual-node.service and remove any of the forbidden
+# directives listed above (the shipped unit has them commented).
+cd ~/ais-virtual-node
+./scripts/update.sh        # re-stages the unit + daemon-reload + restart
+```
+
+The shipped unit on this branch already avoids them; you only hit this if
+you've customised the unit locally or if a future systemd version starts
+implying NNP for one of the remaining directives.
 
 ---
 

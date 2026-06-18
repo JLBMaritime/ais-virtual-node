@@ -31,14 +31,23 @@ StandardError=journal
 SyslogIdentifier=ais-virtual-node
 
 # --- hardening ---
-# The Wi-Fi page calls `sudo nmcli`, so the service must keep the ability to
-# spawn sudo. NoNewPrivileges=true would block that (sudo can't re-elevate),
-# so we deliberately don't set it.
+# The Wi-Fi page calls `sudo nmcli`, so the service MUST keep the ability to
+# spawn sudo. NoNewPrivileges=yes would block that (sudo can't re-elevate
+# and dies with "The 'no new privileges' flag is set"). Crucially, several
+# systemd directives enable NoNewPrivileges *implicitly* even when you never
+# set it yourself - see `man systemd.exec`. The ones to avoid here are:
+#   ProtectKernelTunables=yes     (implies NoNewPrivileges=yes)
+#   ProtectKernelModules=yes      (implies NoNewPrivileges=yes)
+#   ProtectClock=yes              (implies NoNewPrivileges=yes)
+#   SystemCallFilter=...          (any non-empty filter implies it)
+#   RestrictSUIDSGID=yes          (implies it on systemd >= 247)
+#   LockPersonality=yes           (implies it on systemd >= 247)
+# The directives kept below do NOT imply NoNewPrivileges and are safe to use.
+# If you add any of the forbidden ones the Wi-Fi page will start failing with
+# the misleading sudo error above.
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
 
 # Make sure /home/__USER__/ais-virtual-node stays writable for config.json
