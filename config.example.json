@@ -14,7 +14,7 @@
     },
     "aishub": {
       "enabled": false,
-      "username": ""
+      "usernames": [""]
     },
     "kpler": {
       "enabled": false,

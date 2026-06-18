@@ -11,6 +11,11 @@
 #   - This script never touches config.json (it's in .gitignore for a reason).
 #   - If you've made local edits, `git pull --ff-only` will refuse to rewrite
 #     them - resolve manually with `git stash` / `git pull` / `git stash pop`.
+#   - The on-disk config.json schema is auto-migrated by vnode/config.py at
+#     load() time, so updates that rename / restructure fields are transparent.
+#     E.g. the AISHub `username` -> `usernames` list change (see README) is
+#     lifted into the new shape on the first read after this update; nothing
+#     to do by hand.
 set -euo pipefail
 
 # Resolve the app directory from the script's own location so this works no

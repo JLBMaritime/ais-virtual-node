@@ -117,7 +117,7 @@ def api_credentials_post():
     data: Dict[str, Any] = request.get_json(silent=True) or {}
     # data keys (all optional):
     #   aisfriends_token, aisfriends_backend, aisfriends_flaresolverr_url,
-    #   aishub_username
+    #   aishub_usernames (list[str]) OR aishub_username (legacy str)
     updates: Dict[str, Any] = {"sources": {}}
     af: Dict[str, Any] = {}
     if "aisfriends_token" in data:
@@ -131,8 +131,27 @@ def api_credentials_post():
         af["flaresolverr_url"] = (data["aisfriends_flaresolverr_url"] or "").strip() or "http://localhost:8191"
     if af:
         updates["sources"]["aisfriends"] = af
-    if "aishub_username" in data:
-        updates["sources"]["aishub"] = {"username": (data["aishub_username"] or "").strip()}
+    # AISHub: prefer the new list shape, fall back to the single-string
+    # field for back-compat with old clients. Both end up writing the
+    # canonical `usernames` list. Empty rows are filtered out.
+    if "aishub_usernames" in data or "aishub_username" in data:
+        raw = data.get("aishub_usernames")
+        if raw is None:
+            raw = [data.get("aishub_username", "")]
+        if not isinstance(raw, list):
+            raw = [raw]
+        cleaned = []
+        seen = set()
+        for u in raw:
+            s = (u or "").strip() if isinstance(u, str) else ""
+            if s and s not in seen:
+                seen.add(s)
+                cleaned.append(s)
+        # Preserve at least one (possibly empty) entry so the UI doesn't
+        # come back with zero rows after a save-then-reload cycle.
+        if not cleaned:
+            cleaned = [""]
+        updates["sources"]["aishub"] = {"usernames": cleaned}
 
     # Kpler ------------------------------------------------------------
     kp: Dict[str, Any] = {}
@@ -268,7 +287,13 @@ def api_test_source(source: str):
                 flaresolverr_url=fs_url,
             )
         elif source == "aishub":
-            v = src_mod.poll_aishub(bbox, cfg["sources"]["aishub"].get("username", ""))
+            # Smoke-test with the first non-empty username. The optional
+            # per-key variant /api/test-source/aishub/<index> below targets
+            # a specific row.
+            usernames = cfgmod.aishub_usernames(cfg)
+            if not usernames:
+                return jsonify({"ok": False, "error": "no AISHub username configured"}), 200
+            v = src_mod.poll_aishub(bbox, usernames[0])
         elif source == "kpler":
             kpcfg = cfg["sources"].get("kpler", {})
             try:
@@ -295,6 +320,29 @@ def api_test_source(source: str):
             err = str(exc)
         return jsonify({"ok": False, "error": err, "backend": backend if source == "aisfriends" else None}), 200
 
+
+@app.route("/api/test-source/aishub/<int:index>", methods=["POST"])
+def api_test_aishub_key(index: int):
+    """Smoke-test a specific AISHub username (0-based index into usernames[]).
+
+    Used by the per-row Test button on the Credentials page so the user can
+    verify each key independently. Returns the same JSON envelope as the
+    main test endpoint plus the masked username we hit.
+    """
+    from . import sources as src_mod
+    cfg = cfgmod.load()
+    usernames = cfgmod.aishub_usernames(cfg)
+    if index < 0 or index >= len(usernames):
+        return jsonify({"ok": False, "error": f"no AISHub key at index {index}"}), 200
+    user = usernames[index]
+    # Mirror the worker's masking helper so the UI shows the same value as
+    # the per-key status panel.
+    masked = (user[:3] + "…" + user[-2:]) if len(user) > 4 else "*" * len(user)
+    try:
+        v = src_mod.poll_aishub(cfg["bbox"], user)
+        return jsonify({"ok": True, "vessels": len(v), "key": masked})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "key": masked}), 200
 
 
 # ----------- API: Wi-Fi (NetworkManager via nmcli) -----------

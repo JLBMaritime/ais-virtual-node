@@ -483,12 +483,133 @@ const VAISN = (() => {
     if (backendSel) backendSel.addEventListener("change", updateFsRow);
     updateFsRow();
 
+    // ----- AISHub multi-key list ----------------------------------------
+    // The server-rendered template paints the initial rows; the JS below
+    // takes over for add / delete / test / save. Each row uses the same
+    // markup so we can re-render the whole list with one template literal.
+    const ahRowsEl  = $("ah-rows");
+    const ahAddBtn  = $("ah-add");
+    const ahRatePill = $("ah-rate-pill");
+
+    // Pull current poll interval from /api/config so the "effective rate"
+    // readout matches what the worker actually uses. Cached and refreshed
+    // every few seconds in case the user changes it on the Config page.
+    let pollIntervalSec = 60;
+    async function refreshPollInterval() {
+      try {
+        const cfg = await api("/api/config");
+        pollIntervalSec = parseInt((cfg.poll || {}).interval_seconds) || 60;
+        updateRatePill();
+      } catch (_) { /* ignore - keep last known value */ }
+    }
+
+    function readUsernames() {
+      return [...ahRowsEl.querySelectorAll(".ah-row")].map(r => r.querySelector(".ah-user").value);
+    }
+
+    function updateRatePill() {
+      if (!ahRatePill) return;
+      // Count only non-empty rows for the "effective" calculation - empty
+      // rows contribute nothing because the server filters them out.
+      const filled = readUsernames().filter(u => u.trim().length > 0).length;
+      if (filled === 0) {
+        ahRatePill.textContent = "no keys";
+        ahRatePill.className   = "badge bg-warning text-dark float-end";
+        return;
+      }
+      const effective = Math.max(1, Math.round(pollIntervalSec / filled));
+      ahRatePill.textContent = `every ${effective}s · ${filled} key${filled === 1 ? "" : "s"}`;
+      ahRatePill.className   = "badge bg-success float-end";
+    }
+
+    function renderAhRows(values) {
+      // Always show at least one row so the user has somewhere to type.
+      const vs = (values && values.length) ? values : [""];
+      ahRowsEl.innerHTML = vs.map((v, i) => `
+        <div class="ah-row mb-2" data-i="${i}">
+          <div class="row g-2 align-items-center">
+            <div class="col-7">
+              <input class="form-control ah-user" placeholder="AH_xxxx_xxxxxxxx" value="${escapeHtml(v)}">
+            </div>
+            <div class="col-3">
+              <button class="btn btn-outline-secondary btn-sm w-100 ah-test" type="button">Test</button>
+            </div>
+            <div class="col-2">
+              <button class="btn btn-outline-danger btn-sm w-100 ah-del" type="button"
+                ${vs.length === 1 ? 'disabled title="At least one row must remain"' : ''}>×</button>
+            </div>
+          </div>
+          <div class="small ms-1 mt-1 ah-status"></div>
+        </div>`).join("");
+      updateRatePill();
+    }
+
+    // Initial pill state + first refresh of the poll interval.
+    updateRatePill();
+    refreshPollInterval();
+    setInterval(refreshPollInterval, 10000);
+
+    // Re-render when the live key count changes (we keep input values in
+    // sync first so we don't lose what the user typed mid-edit).
+    ahAddBtn.addEventListener("click", () => {
+      const cur = readUsernames();
+      cur.push("");
+      renderAhRows(cur);
+      // Focus the new row so the user can start typing immediately.
+      const rows = ahRowsEl.querySelectorAll(".ah-row .ah-user");
+      if (rows.length) rows[rows.length - 1].focus();
+    });
+
+    // One delegated listener for all per-row buttons + typing.
+    ahRowsEl.addEventListener("click", async (e) => {
+      const row = e.target.closest(".ah-row");
+      if (!row) return;
+      if (e.target.classList.contains("ah-del")) {
+        const cur = readUsernames();
+        const i = parseInt(row.dataset.i);
+        if (cur.length > 1) {
+          cur.splice(i, 1);
+          renderAhRows(cur);
+        }
+      } else if (e.target.classList.contains("ah-test")) {
+        // Per-key smoke-test: save first so the server tests the value the
+        // user actually sees on screen, then call the per-index endpoint.
+        const statusEl = row.querySelector(".ah-status");
+        const idx = parseInt(row.dataset.i);
+        statusEl.textContent = "saving + testing…";
+        statusEl.className   = "small ms-1 mt-1 text-muted";
+        try {
+          await api("/api/credentials", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body:    JSON.stringify({ aishub_usernames: readUsernames() }),
+          });
+          const r = await api(`/api/test-source/aishub/${idx}`, {method: "POST"});
+          if (r.ok) {
+            statusEl.textContent = `OK · ${r.vessels} vessels${r.key ? ` (${r.key})` : ""}`;
+            statusEl.className   = "small ms-1 mt-1 text-success";
+          } else {
+            statusEl.textContent = `Error: ${r.error || "unknown"}`;
+            statusEl.className   = "small ms-1 mt-1 text-danger";
+          }
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.className   = "small ms-1 mt-1 text-danger";
+        }
+      }
+    });
+    ahRowsEl.addEventListener("input", (e) => {
+      if (e.target.classList.contains("ah-user")) updateRatePill();
+    });
+
     $("save-creds").addEventListener("click", async () => {
       const payload = {
         aisfriends_token:            $("af-token").value,
         aisfriends_backend:          backendSel ? backendSel.value : "flaresolverr",
         aisfriends_flaresolverr_url: $("af-fs-url") ? $("af-fs-url").value : "http://localhost:8191",
-        aishub_username:             $("ah-user").value,
+        // New multi-key field. The server still accepts the old
+        // `aishub_username` for back-compat, but we only send the list.
+        aishub_usernames:            readUsernames(),
         // Kpler - all optional, omitted if the card isn't on this page.
         kpler_credential: $("kp-cred")     ? $("kp-cred").value     : "",
         kpler_flavour:    $("kp-flavour")  ? $("kp-flavour").value  : "graphql",
@@ -521,7 +642,6 @@ const VAISN = (() => {
       }
     }
     $("test-af").addEventListener("click", () => runTest("aisfriends", $("test-af"), $("test-af-status")));
-    $("test-ah").addEventListener("click", () => runTest("aishub",     $("test-ah"), $("test-ah-status")));
     if ($("test-kp")) {
       $("test-kp").addEventListener("click", () => runTest("kpler",    $("test-kp"), $("test-kp-status")));
     }

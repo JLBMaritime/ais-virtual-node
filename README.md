@@ -12,7 +12,7 @@ Dashboard, Configuration, Credentials, Logs and Wi-Fi.
 | ------------- | ---------------------------------------------------------------------------- |
 | Dashboard     | Live map of vessels currently in the bounding box, sentence counter, log tail |
 | Configuration | Drag the bounding box, pick poll cadence, choose sources, list TCP/UDP outputs |
-| Credentials   | AIS Friends token, AISHub username, Kpler client_id\:secret, per-source "Test" |
+| Credentials   | AIS Friends token, one or more AISHub usernames (see "Multiple AISHub keys" below), Kpler client_id\:secret, per-source / per-key "Test" |
 | Logs          | Full NMEA console with source colouring                                       |
 | Wi-Fi         | List nearby SSIDs, join/forget networks, see which interface holds the default route |
 
@@ -85,6 +85,32 @@ Open `http://ais-virtual.local:5000` and:
 2. **Configuration** → drag the rectangle over the area you want AIS for,
    add at least one TCP or UDP output, click **Save** then **Start**.
 3. **Dashboard** → vessels appear within a poll cycle (default 60 s).
+
+### Multiple AISHub keys
+
+AISHub rate-limits to **1 request per minute per username**, not per IP — so
+the API key page at `aishub.net` lets you mint more than one and combining
+them is the legitimate way to get a faster effective frame rate.
+
+The **Credentials → AISHub** card therefore accepts a list of usernames:
+
+- Click **+ Add another AISHub key** to add a row, paste each username, then
+  **Save credentials**.
+- Each row has its own **Test** button so you can verify keys individually
+  before they go live.
+- The badge in the card header shows the live effective frame rate, e.g.
+  *"every 20s · 3 keys"*. The maths: each key still polls at the full
+  `poll.interval_seconds` cadence (60 s by default, respecting AISHub's
+  per-key limit), but the N keys are interleaved evenly across the
+  interval, so the AISHub data lands every `interval ÷ N` seconds in
+  aggregate.
+- Adding or removing a key is picked up live by the worker thread; no
+  service restart needed.
+- **Schema migration is automatic.** Old `config.json` files that store a
+  single `username` string are lifted into the new `usernames` list on the
+  first read after `scripts/update.sh`. The migrator runs in
+  `vnode/config.py` and is idempotent, so you can leave the on-disk file
+  alone if you want.
 
 ---
 
