@@ -102,9 +102,56 @@ sudo tailscale up --ssh
 Follow the URL it prints, sign in. From then on every device on your Tailnet
 can reach the box at `http://ais-virtual:5000` regardless of LAN.
 
+### Signing in
+
+The web UI is gated by a session-based login.  On the very first run the
+service creates a small `auth.json` next to `config.json` with the default
+credentials:
+
+| Username      | Password |
+| ------------- | -------- |
+| `JLBMaritime` | `Admin`  |
+
+You will be **forced to choose a new password immediately** after the
+first successful sign-in — the rest of the UI is locked behind the
+change-password page until you do.  The new password is hashed (PBKDF2-
+SHA256, salted) with `werkzeug.security` before being written; only the
+hash is persisted on disk.
+
+A small dropdown in the top-right corner of every page (showing your
+username) gives you **Change password** and **Logout** at any time.
+Sessions last 12 hours of activity, after which you're bounced back to
+the sign-in screen.
+
+The session-signing key for the cookies lives in `secret_key` next to
+`auth.json`, auto-generated on first start (256 bits, hex-encoded) and
+written atomically so a power cut can't half-write it.
+
+#### Forgot the password?
+
+```bash
+sudo systemctl stop  ais-virtual-node
+sudo rm /home/jlbmaritime/ais-virtual-node/auth.json
+sudo systemctl start ais-virtual-node
+```
+
+The service recreates `auth.json` with the default `JLBMaritime` / `Admin`
+credentials and re-arms the forced-change-on-first-login flag, exactly
+as on a fresh install.  `config.json` and all your settings are
+untouched.
+
+#### `/api/healthz`
+
+One endpoint is deliberately unauthenticated: `GET /api/healthz`.
+It returns `{"ok": true, "running": <bool>}` so an external uptime
+monitor can ping the box without needing to log in.  Nothing else on
+`/api/*` is reachable without a session.
+
 ### First boot
 
-Open `http://ais-virtual.local:5000` and:
+Open `http://ais-virtual.local:5000`, sign in with the default
+`JLBMaritime` / `Admin` credentials (see *Signing in* above), choose a
+new password when prompted, then:
 
 1. **Credentials** → paste your tokens, click **Save**, click **Test** on
    each source. Errors are reported verbatim with actionable hints.
@@ -252,7 +299,10 @@ ais-virtual-node/
 ├── requirements.txt
 ├── config.example.json              checked into git
 ├── config.json                      created on first boot (NOT in git)
+├── auth.json                        created on first boot (NOT in git) – login creds
+├── secret_key                       created on first boot (NOT in git) – Flask session key
 ├── vnode/
+│   ├── auth.py                      session-based login + password hashing
 │   ├── config.py                    JSON config load/merge
 │   ├── encoder.py                   ITU-1371 AIVDM/AIVDO encoder
 │   ├── forwarder.py                 TCP/UDP fan-out
@@ -274,14 +324,25 @@ ais-virtual-node/
 
 ## Security notes
 
-- The Flask app has **no authentication**. Bind it only to your LAN /
-  Tailnet (`web.host` in `config.json` defaults to `0.0.0.0:5000`). If
-  you expose it to the public internet, put a reverse proxy with auth
-  in front.
+- The Flask app is gated by a **session-based login** (see *Signing in*
+  above).  Default creds `JLBMaritime` / `Admin` are forced-change-on-
+  first-login.  Passwords are stored as PBKDF2-SHA256 hashes in
+  `auth.json` (`chmod 0600`); the Flask session-signing key lives in
+  `secret_key` next to it, auto-generated on first start.
+- That said, the login is intended as a *who-pressed-Start-by-accident*
+  gate, not a hardened public-internet defence.  Bind the app only to
+  your LAN / Tailnet (`web.host` in `config.json` defaults to
+  `0.0.0.0:5000`).  If you expose it to the public internet, put a
+  reverse proxy with TLS in front.
+- One endpoint is deliberately unauthenticated: `GET /api/healthz`.  It
+  returns only `{"ok": true, "running": <bool>}` so an external uptime
+  monitor can ping the box.  Every other `/api/*` route returns a JSON
+  401 without a valid session.
 - The service user `jlbmaritime` has a `NOPASSWD` sudoers entry for
   exactly one binary: `/usr/bin/nmcli`. Nothing else escalates.
 - `config.json` is `chmod 0640` and owned by `jlbmaritime` — your AIS
   Friends token and Kpler client secret don't leak to other users.
+  `auth.json` and `secret_key` are `chmod 0600`.
 
 ---
 

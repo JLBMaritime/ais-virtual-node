@@ -1,0 +1,20 @@
+# Runtime-generated state that must never end up in git.
+# Each of these files is recreated on first start from sane defaults.
+config.json
+auth.json
+secret_key
+
+# Python build/caching detritus
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

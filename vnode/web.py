@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from typing import Any, Dict
 
-from flask import Flask, jsonify, render_template, request
+from flask import (Flask, jsonify, redirect, render_template, request,
+                   session, url_for)
 
+from . import auth as auth_mod
 from . import config as cfgmod
 from ._paths import bundle_root
 from .worker import WORKER
@@ -18,38 +21,186 @@ app = Flask(__name__,
             template_folder=str(_ROOT / "templates"),
             static_folder=str(_ROOT / "static"))
 
+# Signing key for the session cookie.  Lazily loaded from auth.SECRET_KEY_PATH
+# so importing this module doesn't touch the disk unless Flask is actually
+# starting up.  See auth.load_secret_key() for the on-disk format.
+app.secret_key = auth_mod.load_secret_key()
+# Sessions survive 12h of inactivity but evaporate when the browser closes
+# unless the user ticks "remember me" (we don't expose that – sessions are
+# permanent by default once signed in, see auth.login_user()).
+app.permanent_session_lifetime = timedelta(hours=12)
 
-# ----------- pages -----------
 
+# ---------------------------------------------------------------------------
+# No-cache for API responses
+# ---------------------------------------------------------------------------
+@app.after_request
+def _no_cache_api(resp):
+    """Forbid every browser from caching JSON API responses.
+
+    Without this, iOS WebKit (Safari + "Chrome" on iPhone, which is just
+    Safari under the hood) applies *heuristic freshness* to same-origin
+    fetches and reuses a single /api/status payload for ~30 s – the
+    Dashboard's status pill goes stale and the user thinks the worker
+    has stopped.  Belt-and-braces: client side already appends a
+    cache-buster too.
+    """
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.context_processor
+def _inject_user():
+    """Make ``current_user`` available to every template (notably base.html)."""
+    return {"current_user": auth_mod.current_user()}
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Sign-in page.  Honours an optional ?next= for deep links."""
+    user = auth_mod.load_user()
+    # The "first-run defaults are JLBMaritime/Admin" hint is only shown
+    # while the must_change_password flag is still set – once the user
+    # has chosen a real password we don't want a stale hint advertising
+    # credentials that no longer work.
+    show_hint = user["must_change_password"]
+
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        next_url = request.form.get("next") or ""
+        if auth_mod.verify(username, password):
+            auth_mod.login_user(username)
+            # If the password is still the default, force-change first.
+            if session.get("must_change_password"):
+                return redirect(url_for("change_password_page"))
+            # Only redirect to next= if it's a same-site relative path,
+            # to avoid open-redirect via crafted ?next=https://evil.example.
+            if next_url.startswith("/") and not next_url.startswith("//"):
+                return redirect(next_url)
+            return redirect(url_for("index"))
+        return render_template(
+            "login.html",
+            error="Invalid username or password.",
+            username=username,
+            next_url=next_url,
+            show_default_hint=show_hint,
+        ), 401
+
+    return render_template(
+        "login.html",
+        next_url=request.args.get("next", ""),
+        show_default_hint=show_hint,
+    )
+
+
+@app.route("/logout")
+def logout():
+    auth_mod.logout_user()
+    return redirect(url_for("login"))
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+def change_password_page():
+    """Handles both the forced-on-first-login flow and voluntary changes.
+
+    The two flows share a template; the only behavioural difference is
+    that the voluntary flow re-verifies the current password.  Either
+    way, on success the must_change_password flag is cleared, the
+    session is refreshed and the user is bounced to the dashboard.
+    """
+    user = auth_mod.current_user()
+    if not user:
+        # If you hit this URL without a session, send you back through
+        # /login first.  This also covers the case where the session
+        # cookie was cleared (e.g. a server-side secret_key rotation).
+        return redirect(url_for("login", next=request.path))
+
+    forced = bool(session.get("must_change_password"))
+
+    if request.method == "POST":
+        new_password     = request.form.get("new_password") or ""
+        confirm_password = request.form.get("confirm_password") or ""
+        current_password = request.form.get("current_password") or ""
+
+        # Common validation
+        if len(new_password) < 8:
+            return render_template("change_password.html", forced=forced,
+                                   error="Password must be at least 8 characters."), 400
+        if new_password != confirm_password:
+            return render_template("change_password.html", forced=forced,
+                                   error="The two new passwords do not match."), 400
+
+        # Voluntary flow: prove the user actually knows the current pw.
+        if not forced:
+            if not auth_mod.verify(user, current_password):
+                return render_template("change_password.html", forced=forced,
+                                       error="Current password is incorrect."), 400
+
+        auth_mod.set_password(new_password, clear_must_change=True)
+        # Refresh the session so the must_change_password flag isn't
+        # stale (otherwise login_required would keep redirecting us
+        # back here for the rest of the session lifetime).
+        auth_mod.login_user(user)
+        return redirect(url_for("index"))
+
+    return render_template("change_password.html", forced=forced)
+
+
+# ---------------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------------
 @app.route("/")
+@auth_mod.login_required
 def index():
     return render_template("dashboard.html", page="dashboard")
 
 
 @app.route("/config")
+@auth_mod.login_required
 def config_page():
     return render_template("config.html", page="config", cfg=cfgmod.load())
 
 
 @app.route("/credentials")
+@auth_mod.login_required
 def credentials_page():
     cfg = cfgmod.load()
     return render_template("credentials.html", page="credentials", cfg=cfg)
 
 
 @app.route("/logs")
+@auth_mod.login_required
 def logs_page():
     return render_template("logs.html", page="logs")
 
 
 @app.route("/wifi")
+@auth_mod.login_required
 def wifi_page():
     return render_template("wifi.html", page="wifi")
 
 
-# ----------- API: status / control -----------
+# ---------------------------------------------------------------------------
+# Public liveness probe – the *only* unauthenticated endpoint.  Used by
+# external monitors / uptime checks.  Deliberately discloses zero
+# user-meaningful state.
+# ---------------------------------------------------------------------------
+@app.route("/api/healthz")
+def api_healthz():
+    return jsonify({"ok": True, "running": WORKER.is_running()})
 
+
+# ---------------------------------------------------------------------------
+# API: status / control
+# ---------------------------------------------------------------------------
 @app.route("/api/status")
+@auth_mod.login_required
 def api_status():
     s = dict(WORKER.status)
     s["running"]    = WORKER.is_running()
@@ -60,18 +211,21 @@ def api_status():
 
 
 @app.route("/api/start", methods=["POST"])
+@auth_mod.login_required
 def api_start():
     WORKER.start()
     return jsonify({"running": WORKER.is_running()})
 
 
 @app.route("/api/stop", methods=["POST"])
+@auth_mod.login_required
 def api_stop():
     WORKER.stop()
     return jsonify({"running": WORKER.is_running()})
 
 
 @app.route("/api/vessels")
+@auth_mod.login_required
 def api_vessels():
     out = []
     for v in WORKER.vessels.values():
@@ -91,20 +245,24 @@ def api_vessels():
 
 
 @app.route("/api/log")
+@auth_mod.login_required
 def api_log():
     after = int(request.args.get("after", 0))
     limit = int(request.args.get("limit", 200))
     return jsonify(WORKER.sentence_log.latest(after_id=after, limit=limit))
 
 
-# ----------- API: config -----------
-
+# ---------------------------------------------------------------------------
+# API: config
+# ---------------------------------------------------------------------------
 @app.route("/api/config", methods=["GET"])
+@auth_mod.login_required
 def api_config_get():
     return jsonify(cfgmod.load())
 
 
 @app.route("/api/config", methods=["POST"])
+@auth_mod.login_required
 def api_config_post():
     data: Dict[str, Any] = request.get_json(silent=True) or {}
     cfgmod.update(data)
@@ -113,6 +271,7 @@ def api_config_post():
 
 
 @app.route("/api/credentials", methods=["POST"])
+@auth_mod.login_required
 def api_credentials_post():
     data: Dict[str, Any] = request.get_json(silent=True) or {}
     # data keys (all optional):
@@ -265,6 +424,7 @@ def _classify_kpler_error(exc: BaseException) -> str:
 
 
 @app.route("/api/test-source/<source>", methods=["POST"])
+@auth_mod.login_required
 def api_test_source(source: str):
     """Smoke-test a single source with the saved credentials + bbox."""
     from . import sources as src_mod
@@ -322,6 +482,7 @@ def api_test_source(source: str):
 
 
 @app.route("/api/test-source/aishub/<int:index>", methods=["POST"])
+@auth_mod.login_required
 def api_test_aishub_key(index: int):
     """Smoke-test a specific AISHub username (0-based index into usernames[]).
 
@@ -345,13 +506,16 @@ def api_test_aishub_key(index: int):
         return jsonify({"ok": False, "error": str(exc), "key": masked}), 200
 
 
-# ----------- API: Wi-Fi (NetworkManager via nmcli) -----------
+# ---------------------------------------------------------------------------
+# API: Wi-Fi (NetworkManager via nmcli)
+# ---------------------------------------------------------------------------
 #
 # All wrapped in try/except so the page degrades gracefully on hosts without
 # NetworkManager rather than throwing 500s. The frontend disables the
 # controls when nmcli_available is False.
 
 @app.route("/api/wifi/status")
+@auth_mod.login_required
 def api_wifi_status():
     from . import wifi as wifi_mod
     try:
@@ -361,6 +525,7 @@ def api_wifi_status():
 
 
 @app.route("/api/wifi/scan")
+@auth_mod.login_required
 def api_wifi_scan():
     from . import wifi as wifi_mod
     rescan = request.args.get("rescan", "1") != "0"
@@ -371,6 +536,7 @@ def api_wifi_scan():
 
 
 @app.route("/api/wifi/saved")
+@auth_mod.login_required
 def api_wifi_saved():
     from . import wifi as wifi_mod
     try:
@@ -380,6 +546,7 @@ def api_wifi_saved():
 
 
 @app.route("/api/wifi/connect", methods=["POST"])
+@auth_mod.login_required
 def api_wifi_connect():
     from . import wifi as wifi_mod
     data = request.get_json(silent=True) or {}
@@ -393,6 +560,7 @@ def api_wifi_connect():
 
 
 @app.route("/api/wifi/forget", methods=["POST"])
+@auth_mod.login_required
 def api_wifi_forget():
     from . import wifi as wifi_mod
     data = request.get_json(silent=True) or {}
